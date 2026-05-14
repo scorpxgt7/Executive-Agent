@@ -1,6 +1,6 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import List, Dict, Any, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 
 class GoalStatus(str, Enum):
@@ -23,11 +23,11 @@ class Goal(BaseModel):
     id: str
     description: str
     objectives: List[str]
-    constraints: Dict[str, Any]
-    deadline: Optional[datetime]
+    constraints: Dict[str, Any] = Field(default_factory=dict)
+    deadline: Optional[datetime] = None
     priority: int = 1
     status: GoalStatus = GoalStatus.PENDING
-    created_at: datetime = datetime.utcnow()
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 class Task(BaseModel):
     id: str
@@ -37,9 +37,9 @@ class Task(BaseModel):
     parameters: Dict[str, Any]
     assigned_agent: Optional[str]
     status: TaskStatus = TaskStatus.PENDING
-    dependencies: List[str] = []
-    created_at: datetime = datetime.utcnow()
-    completed_at: Optional[datetime]
+    dependencies: List[str] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    completed_at: Optional[datetime] = None
 
 class ExecutionPlan(BaseModel):
     id: str
@@ -48,7 +48,7 @@ class ExecutionPlan(BaseModel):
     approval_required: bool = False
     approved: bool = False
     learning_insights: Optional[Dict[str, Any]] = None
-    created_at: datetime
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 class Agent(BaseModel):
     id: str
@@ -67,12 +67,12 @@ class ApprovalRequest(BaseModel):
     reason: str
     requested_by: str
     status: str = "pending"
-    created_at: datetime
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 class MemoryEntry(BaseModel):
     id: str
     type: str  # "short_term", "episodic", "semantic", "organizational"
     content: Dict[str, Any]
     context: Dict[str, Any]
-    timestamp: datetime
-    expires_at: Optional[datetime]
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    expires_at: Optional[datetime] = None

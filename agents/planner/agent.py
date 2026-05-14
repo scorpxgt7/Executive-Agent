@@ -8,7 +8,15 @@ logger = structlog.get_logger()
 
 class PlannerAgent:
     def __init__(self):
-        self.client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        api_key = os.getenv("OPENAI_API_KEY")
+        if api_key:
+            try:
+                self.client = openai.OpenAI(api_key=api_key)
+            except Exception as e:
+                logger.error("Failed to initialize OpenAI client for PlannerAgent", error=str(e))
+                self.client = None
+        else:
+            self.client = None
 
     async def analyze_goal(self, goal: Goal) -> Dict[str, Any]:
         """Analyze a goal and provide strategic insights"""

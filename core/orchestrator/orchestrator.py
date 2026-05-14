@@ -1,6 +1,6 @@
 import asyncio
 from typing import Dict, List, Any
-from datetime import datetime
+from datetime import datetime, timezone
 import structlog
 from temporalio.client import Client
 from temporalio.worker import Worker
@@ -20,7 +20,7 @@ class Orchestrator:
         self.events = EventPublisher()
         self.permissions = PermissionManager()
         self.agents = AgentRegistry()
-        self.learning = LearningManager()
+        self.learning = LearningManager(memory=self.memory)
         self.temporal_client = None
 
     async def initialize(self):
@@ -110,13 +110,16 @@ class Orchestrator:
             await self._request_approval(plan)
             return plan.id
 
-        # Start execution workflow
-        await self.temporal_client.start_workflow(
-            GoalExecutionWorkflow.run,
-            args=[plan],
-            id=f"goal-{goal.id}",
-            task_queue="executive-agent-queue",
-        )
+        # Start execution workflow if the Temporal client is initialized
+        if self.temporal_client is not None:
+            await self.temporal_client.start_workflow(
+                GoalExecutionWorkflow.run,
+                args=[plan],
+                id=f"goal-{goal.id}",
+                task_queue="executive-agent-queue",
+            )
+        else:
+            logger.info("Temporal client not initialized, skipping workflow start", plan_id=plan.id)
 
         # Emit event
         await self.events.publish("GOAL_RECEIVED", {"goal_id": goal.id, "plan_id": plan.id})
@@ -128,8 +131,6 @@ class Orchestrator:
         # Use OpenAI to analyze the goal
         import openai
         import os
-
-        client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
         prompt = f"""
         Analyze this goal and provide a structured analysis:
@@ -151,6 +152,7 @@ class Orchestrator:
         """
 
         try:
+            client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
             response = client.chat.completions.create(
                 model="gpt-4",
                 messages=[{"role": "user", "content": prompt}],
@@ -165,7 +167,7 @@ class Orchestrator:
             return analysis
         except Exception as e:
             logger.error("Failed to analyze goal with AI", error=str(e))
-            # Fallback analysis
+            # Fallback analysis when AI is unavailable or API key is missing
             return {
                 "complexity": "medium",
                 "estimated_duration_days": 30,
@@ -188,7 +190,7 @@ class Orchestrator:
             id=f"plan-{goal.id}",
             goal_id=goal.id,
             tasks=assigned_tasks,
-            created_at=datetime.utcnow()
+            created_at=datetime.now(timezone.utc)
         )
 
         return plan
