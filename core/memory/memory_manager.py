@@ -1,7 +1,8 @@
 from typing import Dict, Any, List
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import asyncpg
 import redis.asyncio as redis
+import json
 from shared.models import MemoryEntry
 import structlog
 
@@ -19,37 +20,58 @@ class MemoryManager:
     async def store_short_term(self, session_id: str, content: Dict[str, Any], ttl_minutes: int = 60):
         """Store short-term memory with TTL"""
         key = f"short_term:{session_id}"
-        await self.redis.setex(key, ttl_minutes * 60, str(content))
+        if self.redis:
+            await self.redis.setex(key, ttl_minutes * 60, json.dumps(content))
 
-        # Also store in DB for persistence
-        expires_at = datetime.utcnow() + timedelta(minutes=ttl_minutes)
-        await self.postgres.execute("""
-            INSERT INTO agent_memory.short_term (session_id, content, expires_at)
-            VALUES ($1, $2, $3)
-        """, session_id, content, expires_at)
+        if self.postgres:
+            expires_at = datetime.now(timezone.utc) + timedelta(minutes=ttl_minutes)
+            await self.postgres.execute("""
+                INSERT INTO agent_memory.short_term (session_id, content, expires_at)
+                VALUES ($1, $2, $3)
+            """, session_id, json.dumps(content), expires_at)
 
     async def retrieve_short_term(self, session_id: str) -> Dict[str, Any]:
         """Retrieve short-term memory"""
+        if not self.redis:
+            return {}
         key = f"short_term:{session_id}"
         data = await self.redis.get(key)
-        return eval(data) if data else {}
+        if not data:
+            return {}
+        try:
+            if isinstance(data, bytes):
+                data = data.decode('utf-8')
+            return json.loads(data)
+        except Exception:
+            return {}
 
     async def store_episodic(self, task_id: str, content: Dict[str, Any], outcome: Dict[str, Any]):
         """Store episodic memory"""
+        if not self.postgres:
+            logger.warning("Postgres not initialized, skipping episodic memory store", task_id=task_id)
+            return
+
         await self.postgres.execute("""
             INSERT INTO agent_memory.episodic (task_id, content, outcome)
             VALUES ($1, $2, $3)
-        """, task_id, content, outcome)
+        """, task_id, json.dumps(content), json.dumps(outcome))
 
     async def store_semantic(self, content_id: str, embedding: List[float], metadata: Dict[str, Any]):
         """Store semantic memory with vector embedding"""
+        if not self.postgres:
+            logger.warning("Postgres not initialized, skipping semantic memory store", content_id=content_id)
+            return
+
         await self.postgres.execute("""
             INSERT INTO agent_memory.semantic (id, content, metadata)
             VALUES ($1, $2, $3)
-        """, content_id, embedding, metadata)
+        """, content_id, embedding, json.dumps(metadata))
 
     async def search_semantic(self, query_embedding: List[float], limit: int = 10) -> List[Dict[str, Any]]:
         """Search semantic memory using vector similarity"""
+        if not self.postgres:
+            return []
+
         rows = await self.postgres.fetch("""
             SELECT id, metadata, 1 - (content <=> $1) as similarity
             FROM agent_memory.semantic
@@ -64,6 +86,9 @@ class MemoryManager:
 
     async def get_task_history(self, task_id: str) -> List[Dict[str, Any]]:
         """Get execution history for a task"""
+        if not self.postgres:
+            return []
+
         rows = await self.postgres.fetch("""
             SELECT * FROM agent_memory.episodic
             WHERE task_id = $1
