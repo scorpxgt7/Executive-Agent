@@ -40,6 +40,7 @@ app.add_middleware(
 
 # Initialize core components
 orchestrator = Orchestrator()
+app.state.orchestrator = orchestrator
 
 # Include routers
 app.include_router(goals.router, prefix="/api/v1/goals", tags=["goals"])

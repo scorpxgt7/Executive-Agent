@@ -1,5 +1,5 @@
 import asyncio
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 from datetime import datetime, timezone
 import structlog
 from temporalio.client import Client
@@ -22,6 +22,7 @@ class Orchestrator:
         self.agents = AgentRegistry()
         self.learning = LearningManager(memory=self.memory)
         self.temporal_client = None
+        self.plan_store: Dict[str, ExecutionPlan] = {}
 
     async def initialize(self):
         # Initialize Temporal client
@@ -104,6 +105,9 @@ class Orchestrator:
         # Refine plan using advanced learning insights
         plan = await self.learning.refine_execution_plan(plan, goal, analysis)
 
+        # Store the execution plan locally for API access and monitoring
+        self.plan_store[plan.id] = plan
+
         # Check permissions and request approvals if needed
         approval_required = self.permissions.check_approval_required(plan)
         if approval_required:
@@ -125,6 +129,12 @@ class Orchestrator:
         await self.events.publish("GOAL_RECEIVED", {"goal_id": goal.id, "plan_id": plan.id})
 
         return plan.id
+
+    def get_plan(self, plan_id: str) -> Optional[ExecutionPlan]:
+        return self.plan_store.get(plan_id)
+
+    def get_plan_by_goal(self, goal_id: str) -> Optional[ExecutionPlan]:
+        return next((plan for plan in self.plan_store.values() if plan.goal_id == goal_id), None)
 
     async def _analyze_goal(self, goal: Goal) -> Dict[str, Any]:
         """Analyze goal using AI"""
