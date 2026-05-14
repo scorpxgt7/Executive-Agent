@@ -225,9 +225,10 @@ class Orchestrator:
             raise
 
     async def _route_to_agent(self, task: Task) -> Dict[str, Any]:
-        """Route task to appropriate agent"""
+        """Route task to appropriate agent or worker"""
         task_type = task.type.lower()
 
+        # Route to specialized agents
         if task_type in ["planning", "strategy", "analysis"]:
             from agents.planner.agent import PlannerAgent
             agent = PlannerAgent()
@@ -263,6 +264,43 @@ class Orchestrator:
                 return await agent.generate_insights(task)
             else:
                 return await agent.analyze_performance(task)
+
+        # Route to execution workers
+        elif task_type in ["automation", "web", "browser"]:
+            from workers.browser.worker import BrowserWorker
+            worker = BrowserWorker()
+            await worker.initialize()
+            result = await worker.execute_task(task.parameters)
+            await worker.cleanup()
+            return result
+
+        elif task_type in ["api", "webhook", "integration"]:
+            from workers.api.worker import APIWorker
+            worker = APIWorker()
+            await worker.initialize()
+            result = await worker.execute_task(task.parameters)
+            await worker.cleanup()
+            return result
+
+        elif task_type in ["email", "notification"]:
+            from workers.email.worker import EmailWorker
+            worker = EmailWorker()
+            result = await worker.execute_task(task.parameters)
+            return result
+
+        elif task_type in ["filesystem", "file", "storage"]:
+            from workers.filesystem.worker import FilesystemWorker
+            worker = FilesystemWorker()
+            result = await worker.execute_task(task.parameters)
+            return result
+
+        elif task_type in ["deployment", "ci_cd", "infrastructure"]:
+            from workers.deployment.worker import DeploymentWorker
+            worker = DeploymentWorker()
+            await worker.initialize()
+            result = await worker.execute_task(task.parameters)
+            await worker.cleanup()
+            return result
 
         else:
             # Default fallback
