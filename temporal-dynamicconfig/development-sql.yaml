@@ -1,0 +1,20 @@
+frontend.enableUpdateWorkflowExecution:
+- value: true
+frontend.enableUpdateWorkflowExecutionAsyncAccepted:
+- value: true
+system.enableActivityEagerExecution:
+- value: true
+system.enableEagerWorkflowStart:
+- value: true
+history.persistenceMaxQPS:
+- value: 3000
+frontend.persistenceMaxQPS:
+- value: 3000
+frontend.throttledLogRPS:
+- value: 20
+history.throttledLogRPS:
+- value: 20
+matching.throttledLogRPS:
+- value: 20
+worker.throttledLogRPS:
+- value: 20
