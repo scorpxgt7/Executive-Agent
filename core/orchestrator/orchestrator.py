@@ -8,6 +8,7 @@ from core.memory.memory_manager import MemoryManager
 from core.events.event_publisher import EventPublisher
 from core.governance.permission_manager import PermissionManager
 from agents.registry import AgentRegistry
+from agents.planner.agent import PlannerAgent
 from shared.models import Goal, Task, ExecutionPlan
 
 logger = structlog.get_logger()
@@ -24,6 +25,9 @@ class Orchestrator:
         # Initialize Temporal client
         self.temporal_client = await Client.connect("localhost:7233")
 
+        # Register core agents
+        await self._register_core_agents()
+
         # Start worker
         worker = Worker(
             self.temporal_client,
@@ -32,6 +36,58 @@ class Orchestrator:
             activities=[self.execute_task_activity],
         )
         await worker.run()
+
+    async def _register_core_agents(self):
+        """Register core agents"""
+        from shared.models import Agent
+
+        # Register planner agent
+        planner_agent = Agent(
+            id="planner_agent",
+            name="Strategic Planner",
+            role="planner",
+            capabilities=["goal_analysis", "strategy_planning", "task_decomposition", "risk_assessment"],
+            tools=["openai", "analysis_frameworks"],
+            limits={"daily_budget": 50, "max_parallel_tasks": 2},
+            permissions={"requires_human_approval": False}
+        )
+        self.agents.register_agent(planner_agent)
+
+        # Register research agent
+        research_agent = Agent(
+            id="research_agent",
+            name="Research Analyst",
+            role="research",
+            capabilities=["market_research", "competitive_analysis", "data_gathering", "trend_analysis"],
+            tools=["openai", "web_search", "data_analysis"],
+            limits={"daily_budget": 30, "max_parallel_tasks": 3},
+            permissions={"requires_human_approval": False}
+        )
+        self.agents.register_agent(research_agent)
+
+        # Register marketing agent
+        marketing_agent = Agent(
+            id="marketing_agent",
+            name="Content Marketer",
+            role="marketing",
+            capabilities=["content_creation", "social_media", "promotion_strategy", "brand_management"],
+            tools=["openai", "content_tools", "social_platforms"],
+            limits={"daily_budget": 40, "max_parallel_tasks": 2},
+            permissions={"requires_human_approval": True}  # Content publishing needs approval
+        )
+        self.agents.register_agent(marketing_agent)
+
+        # Register analytics agent
+        analytics_agent = Agent(
+            id="analytics_agent",
+            name="Data Analyst",
+            role="analytics",
+            capabilities=["performance_analysis", "goal_tracking", "insight_generation", "reporting"],
+            tools=["openai", "analytics_tools", "data_visualization"],
+            limits={"daily_budget": 25, "max_parallel_tasks": 1},
+            permissions={"requires_human_approval": False}
+        )
+        self.agents.register_agent(analytics_agent)
 
     async def receive_goal(self, goal: Goal) -> str:
         """Receive and process a new goal"""
@@ -64,9 +120,56 @@ class Orchestrator:
 
     async def _analyze_goal(self, goal: Goal) -> Dict[str, Any]:
         """Analyze goal using AI"""
-        # Use LLM to analyze goal
-        # This would call OpenAI API
-        return {"complexity": "medium", "required_agents": ["planner", "research"]}
+        # Use OpenAI to analyze the goal
+        import openai
+        import os
+
+        client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+        prompt = f"""
+        Analyze this goal and provide a structured analysis:
+
+        Goal: {goal.description}
+        Objectives: {', '.join(goal.objectives)}
+        Constraints: {goal.constraints}
+
+        Provide analysis in JSON format:
+        {{
+            "complexity": "low|medium|high",
+            "estimated_duration_days": number,
+            "required_capabilities": ["list", "of", "capabilities"],
+            "risk_level": "low|medium|high",
+            "success_criteria": ["measurable", "criteria"],
+            "potential_strategies": ["strategy1", "strategy2"],
+            "required_agents": ["agent_type1", "agent_type2"]
+        }}
+        """
+
+        try:
+            response = client.chat.completions.create(
+                model="gpt-4",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.3,
+                max_tokens=1000
+            )
+
+            analysis_text = response.choices[0].message.content
+            # Parse JSON response
+            import json
+            analysis = json.loads(analysis_text.strip('```json').strip('```'))
+            return analysis
+        except Exception as e:
+            logger.error("Failed to analyze goal with AI", error=str(e))
+            # Fallback analysis
+            return {
+                "complexity": "medium",
+                "estimated_duration_days": 30,
+                "required_capabilities": ["research", "marketing", "analytics"],
+                "risk_level": "medium",
+                "success_criteria": ["earn $100 online"],
+                "potential_strategies": ["content creation", "affiliate marketing", "freelancing"],
+                "required_agents": ["planner", "research", "marketing", "analytics"]
+            }
 
     async def _generate_plan(self, goal: Goal, analysis: Dict) -> ExecutionPlan:
         """Generate execution plan"""
@@ -86,9 +189,9 @@ class Orchestrator:
         return plan
 
     async def _decompose_goal(self, goal: Goal, analysis: Dict) -> List[Task]:
-        """Break goal into executable tasks"""
-        # Use planner agent or LLM
-        return []
+        """Break goal into executable tasks using planner agent"""
+        planner = PlannerAgent()
+        return await planner.create_execution_plan(goal, analysis)
 
     async def _assign_agents(self, tasks: List[Task]) -> List[Task]:
         """Assign appropriate agents to tasks"""
@@ -102,24 +205,77 @@ class Orchestrator:
         await self.events.publish("APPROVAL_REQUESTED", {"plan_id": plan.id})
 
     async def execute_task_activity(self, task: Task) -> Dict[str, Any]:
-        """Activity to execute a task through appropriate worker"""
-        logger.info("Executing task", task_id=task.id)
+        """Activity to execute a task through appropriate agent"""
+        logger.info("Executing task", task_id=task.id, task_type=task.type)
 
-        # Route to appropriate worker
-        worker_result = await self._route_to_worker(task)
+        try:
+            # Route to appropriate agent based on task type
+            result = await self._route_to_agent(task)
 
-        # Update memory
-        await self.memory.store_execution_result(task.id, worker_result)
+            # Update memory
+            await self.memory.store_execution_result(task.id, result)
 
-        # Emit event
-        await self.events.publish("TASK_COMPLETED", {"task_id": task.id})
+            # Emit event
+            await self.events.publish("TASK_COMPLETED", {"task_id": task.id, "result": result})
 
-        return worker_result
+            return result
+        except Exception as e:
+            logger.error("Task execution failed", task_id=task.id, error=str(e))
+            await self.events.publish("TASK_FAILED", {"task_id": task.id, "error": str(e)})
+            raise
 
-    async def _route_to_worker(self, task: Task) -> Dict[str, Any]:
-        """Route task to appropriate execution worker"""
-        # This would call the worker services
-        return {"status": "success", "result": "mock result"}
+    async def _route_to_agent(self, task: Task) -> Dict[str, Any]:
+        """Route task to appropriate agent"""
+        task_type = task.type.lower()
+
+        if task_type in ["planning", "strategy", "analysis"]:
+            from agents.planner.agent import PlannerAgent
+            agent = PlannerAgent()
+            if "analyze" in task.description.lower():
+                return await agent.analyze_goal(self._get_goal_from_task(task), {})
+            else:
+                return await agent.create_execution_plan(self._get_goal_from_task(task), {})
+
+        elif task_type in ["research", "market_research", "competitive_analysis"]:
+            from agents.research.agent import ResearchAgent
+            agent = ResearchAgent()
+            if "competition" in task.description.lower():
+                return await agent.analyze_competition(task)
+            else:
+                return await agent.conduct_research(task)
+
+        elif task_type in ["marketing", "content", "promotion"]:
+            from agents.marketing.agent import MarketingAgent
+            agent = MarketingAgent()
+            if "promote" in task.description.lower():
+                return await agent.create_promotion_strategy(task)
+            elif "optimize" in task.description.lower():
+                return await agent.optimize_content(task)
+            else:
+                return await agent.create_content(task)
+
+        elif task_type in ["analytics", "tracking", "insights"]:
+            from agents.analytics.agent import AnalyticsAgent
+            agent = AnalyticsAgent()
+            if "track" in task.description.lower():
+                return await agent.track_goals(task)
+            elif "insight" in task.description.lower():
+                return await agent.generate_insights(task)
+            else:
+                return await agent.analyze_performance(task)
+
+        else:
+            # Default fallback
+            return {"status": "completed", "result": f"Task {task.id} executed via default handler"}
+
+    def _get_goal_from_task(self, task: Task) -> Goal:
+        """Get goal object from task (placeholder - would query database)"""
+        # This would normally query the database for the goal
+        return Goal(
+            id=task.goal_id,
+            description="Earn $100 online in 30 days",
+            objectives=["Research opportunities", "Create content", "Monetize"]
+        )
 
     async def monitor_execution(self, plan_id: str):
         """Monitor ongoing execution"""
