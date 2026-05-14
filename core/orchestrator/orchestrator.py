@@ -7,6 +7,7 @@ from temporalio.worker import Worker
 from core.memory.memory_manager import MemoryManager
 from core.events.event_publisher import EventPublisher
 from core.governance.permission_manager import PermissionManager
+from core.learning.learning_manager import LearningManager
 from agents.registry import AgentRegistry
 from agents.planner.agent import PlannerAgent
 from shared.models import Goal, Task, ExecutionPlan
@@ -19,6 +20,7 @@ class Orchestrator:
         self.events = EventPublisher()
         self.permissions = PermissionManager()
         self.agents = AgentRegistry()
+        self.learning = LearningManager()
         self.temporal_client = None
 
     async def initialize(self):
@@ -98,6 +100,9 @@ class Orchestrator:
 
         # Generate execution plan
         plan = await self._generate_plan(goal, analysis)
+
+        # Refine plan using advanced learning insights
+        plan = await self.learning.refine_execution_plan(plan, goal, analysis)
 
         # Check permissions and request approvals if needed
         approval_required = self.permissions.check_approval_required(plan)

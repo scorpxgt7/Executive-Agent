@@ -47,6 +47,7 @@ class ExecutionPlan(BaseModel):
     tasks: List[Task]
     approval_required: bool = False
     approved: bool = False
+    learning_insights: Optional[Dict[str, Any]] = None
     created_at: datetime
 
 class Agent(BaseModel):
