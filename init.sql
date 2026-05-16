@@ -34,6 +34,21 @@ CREATE TABLE agent_core.tasks (
     result JSONB
 );
 
+-- Execution plans
+CREATE TABLE agent_core.execution_plans (
+    id VARCHAR(255) PRIMARY KEY,
+    goal_id VARCHAR(255) REFERENCES agent_core.goals(id),
+    tasks JSONB NOT NULL DEFAULT '[]',
+    approval_required BOOLEAN DEFAULT false,
+    approved BOOLEAN DEFAULT false,
+    learning_insights JSONB,
+    status VARCHAR(50) DEFAULT 'planning',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    started_at TIMESTAMP,
+    completed_at TIMESTAMP,
+    result JSONB
+);
+
 -- Agents table
 CREATE TABLE agent_core.agents (
     id VARCHAR(255) PRIMARY KEY,
@@ -96,6 +111,8 @@ CREATE TABLE agent_events.events (
 
 -- Indexes
 CREATE INDEX idx_goals_status ON agent_core.goals(status);
+CREATE INDEX idx_execution_plans_goal_id ON agent_core.execution_plans(goal_id);
+CREATE INDEX idx_execution_plans_status ON agent_core.execution_plans(status);
 CREATE INDEX idx_tasks_goal_id ON agent_core.tasks(goal_id);
 CREATE INDEX idx_tasks_status ON agent_core.tasks(status);
 CREATE INDEX idx_approvals_status ON agent_core.approvals(status);

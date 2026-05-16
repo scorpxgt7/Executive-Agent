@@ -98,7 +98,18 @@ class MemoryManager:
 
     async def cleanup_expired(self):
         """Clean up expired short-term memory"""
+        if not self.postgres:
+            return
         await self.postgres.execute("""
             DELETE FROM agent_memory.short_term
             WHERE expires_at < CURRENT_TIMESTAMP
         """)
+
+    async def close(self):
+        """Close memory backend connections."""
+        if self.redis:
+            await self.redis.aclose()
+            self.redis = None
+        if self.postgres:
+            await self.postgres.close()
+            self.postgres = None
