@@ -1,4 +1,5 @@
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Request
+from core.orchestrator.orchestrator import Orchestrator
 from core.security.auth import require_role, verify_token, UserContext
 from core.security.rbac import RBAC
 import structlog
@@ -7,8 +8,15 @@ logger = structlog.get_logger()
 router = APIRouter()
 
 
+def get_orchestrator(request: Request):
+    return request.app.state.orchestrator
+
+
 @router.get("/")
-async def list_agents(user: UserContext = Depends(verify_token)):
+async def list_agents(
+    user: UserContext = Depends(verify_token),
+    orchestrator: Orchestrator = Depends(get_orchestrator),
+):
     """
     List all agents
 
@@ -23,8 +31,8 @@ async def list_agents(user: UserContext = Depends(verify_token)):
 
     logger.info("agents_list_requested", user_id=user.user_id)
 
-    # TODO: Query from database/registry
-    return {"agents": [], "count": 0}
+    agents = await orchestrator.list_agents()
+    return {"agents": agents, "count": len(agents)}
 
 
 @router.post("/")

@@ -1,4 +1,5 @@
 from fastapi import APIRouter, HTTPException, Depends, Request
+from core.orchestrator.orchestrator import Orchestrator
 from core.security.auth import verify_token, UserContext
 from core.security.rbac import RBAC
 from pydantic import BaseModel
@@ -6,6 +7,10 @@ import structlog
 
 logger = structlog.get_logger()
 router = APIRouter()
+
+
+def get_orchestrator(request: Request):
+    return request.app.state.orchestrator
 
 
 class ApprovalResponse(BaseModel):
@@ -24,7 +29,10 @@ class ApproveRequest(BaseModel):
 
 
 @router.get("/", response_model=dict)
-async def list_approvals(user: UserContext = Depends(verify_token)):
+async def list_approvals(
+    user: UserContext = Depends(verify_token),
+    orchestrator: Orchestrator = Depends(get_orchestrator),
+):
     """
     List approval requests
 
@@ -39,10 +47,10 @@ async def list_approvals(user: UserContext = Depends(verify_token)):
 
     logger.info("approvals_list_requested", user_id=user.user_id)
 
-    # TODO: Query from database when persistence is implemented
+    approvals = await orchestrator.list_approvals()
     return {
-        "approvals": [],
-        "count": 0
+        "approvals": approvals,
+        "count": len(approvals)
     }
 
 
@@ -50,6 +58,7 @@ async def list_approvals(user: UserContext = Depends(verify_token)):
 async def approve_request(
     approval_id: str,
     request: ApproveRequest,
+    orchestrator: Orchestrator = Depends(get_orchestrator),
     user: UserContext = Depends(verify_token)
 ):
     """
@@ -72,18 +81,23 @@ async def approve_request(
         decision=request.decision
     )
 
-    # TODO: Persist decision to database and trigger appropriate workflow
-    return {
-        "approval_id": approval_id,
-        "status": request.decision,
-        "decided_by": user.user_id,
-        "notes": request.notes
-    }
+    try:
+        result = await orchestrator.decide_approval(approval_id, request.decision, user.user_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if not result:
+        raise HTTPException(status_code=404, detail="Approval not found")
+
+    if request.notes:
+        result["notes"] = request.notes
+    return result
 
 
 @router.get("/{approval_id}")
 async def get_approval(
     approval_id: str,
+    orchestrator: Orchestrator = Depends(get_orchestrator),
     user: UserContext = Depends(verify_token)
 ):
     """
@@ -99,5 +113,7 @@ async def get_approval(
         )
         raise HTTPException(status_code=403, detail="Permission denied")
 
-    # TODO: Query from database when persistence is implemented
-    raise HTTPException(status_code=404, detail="Approval not found")
+    approval = await orchestrator.get_approval(approval_id)
+    if not approval:
+        raise HTTPException(status_code=404, detail="Approval not found")
+    return approval

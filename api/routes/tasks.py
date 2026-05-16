@@ -1,4 +1,5 @@
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Request
+from core.orchestrator.orchestrator import Orchestrator
 from core.security.auth import verify_token, UserContext
 from core.security.rbac import RBAC
 import structlog
@@ -7,8 +8,15 @@ logger = structlog.get_logger()
 router = APIRouter()
 
 
+def get_orchestrator(request: Request):
+    return request.app.state.orchestrator
+
+
 @router.get("/")
-async def list_tasks(user: UserContext = Depends(verify_token)):
+async def list_tasks(
+    user: UserContext = Depends(verify_token),
+    orchestrator: Orchestrator = Depends(get_orchestrator),
+):
     """
     List all tasks
 
@@ -23,12 +31,16 @@ async def list_tasks(user: UserContext = Depends(verify_token)):
 
     logger.info("tasks_list_requested", user_id=user.user_id)
 
-    # TODO: Query from database
-    return {"tasks": [], "count": 0}
+    tasks = await orchestrator.list_tasks()
+    return {"tasks": tasks, "count": len(tasks)}
 
 
 @router.get("/{task_id}")
-async def get_task(task_id: str, user: UserContext = Depends(verify_token)):
+async def get_task(
+    task_id: str,
+    user: UserContext = Depends(verify_token),
+    orchestrator: Orchestrator = Depends(get_orchestrator),
+):
     """
     Get task details
 
@@ -42,5 +54,7 @@ async def get_task(task_id: str, user: UserContext = Depends(verify_token)):
         )
         raise HTTPException(status_code=403, detail="Permission denied")
 
-    # TODO: Query from database
-    raise HTTPException(status_code=404, detail="Task not found")
+    task = await orchestrator.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return task
