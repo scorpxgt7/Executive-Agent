@@ -1,8 +1,10 @@
 import asyncio
+import json
 from typing import Dict, List, Any, Optional
 from datetime import datetime, timezone
 import structlog
 from temporalio.client import Client
+from temporalio import activity
 from temporalio.worker import Worker
 from core.memory.memory_manager import MemoryManager
 from core.events.event_publisher import EventPublisher
@@ -10,6 +12,7 @@ from core.governance.permission_manager import PermissionManager
 from core.learning.learning_manager import LearningManager
 from agents.registry import AgentRegistry
 from agents.planner.agent import PlannerAgent
+from core.orchestrator.workflow import GoalExecutionWorkflow
 from shared.models import Goal, Task, ExecutionPlan
 
 logger = structlog.get_logger()
@@ -105,11 +108,18 @@ class Orchestrator:
         # Refine plan using advanced learning insights
         plan = await self.learning.refine_execution_plan(plan, goal, analysis)
 
-        # Store the execution plan locally for API access and monitoring
-        self.plan_store[plan.id] = plan
-
         # Check permissions and request approvals if needed
         approval_required = self.permissions.check_approval_required(plan)
+        plan.approval_required = approval_required
+        if approval_required:
+            goal.status = "approval_pending"
+        else:
+            goal.status = "executing"
+
+        # Store the execution plan locally and persist it when a database is available.
+        self.plan_store[plan.id] = plan
+        await self._persist_goal_plan_and_tasks(goal, plan)
+
         if approval_required:
             await self._request_approval(plan)
             return plan.id
@@ -135,6 +145,48 @@ class Orchestrator:
 
     def get_plan_by_goal(self, goal_id: str) -> Optional[ExecutionPlan]:
         return next((plan for plan in self.plan_store.values() if plan.goal_id == goal_id), None)
+
+    async def get_plan_by_goal_async(self, goal_id: str) -> Optional[ExecutionPlan]:
+        """Get a plan by goal id, preferring memory and falling back to the database."""
+        plan = self.get_plan_by_goal(goal_id)
+        if plan:
+            return plan
+
+        row = await self._fetch_plan_row("goal_id", goal_id)
+        if not row:
+            return None
+        return self._plan_from_row(row)
+
+    async def list_goal_summaries(self) -> List[Dict[str, Any]]:
+        """List goal summaries for the API, preferring database state when available."""
+        if self.memory.postgres:
+            try:
+                rows = await self.memory.postgres.fetch("""
+                    SELECT
+                        p.id AS plan_id,
+                        p.goal_id,
+                        p.status,
+                        p.learning_insights,
+                        p.tasks,
+                        g.priority
+                    FROM agent_core.execution_plans p
+                    LEFT JOIN agent_core.goals g ON g.id = p.goal_id
+                    ORDER BY p.created_at DESC
+                """)
+                return [self._goal_summary_from_row(row) for row in rows]
+            except Exception as e:
+                logger.warning("Failed to list goals from database, using memory", error=str(e))
+
+        return [
+            {
+                "goal_id": plan.goal_id,
+                "plan_id": plan.id,
+                "status": "approval_pending" if plan.approval_required and not plan.approved else "executing",
+                "learning_insights": plan.learning_insights,
+                "task_count": len(plan.tasks),
+            }
+            for plan in self.plan_store.values()
+        ]
 
     async def _analyze_goal(self, goal: Goal) -> Dict[str, Any]:
         """Analyze goal using AI"""
@@ -219,8 +271,168 @@ class Orchestrator:
 
     async def _request_approval(self, plan: ExecutionPlan):
         """Request human approval for plan"""
-        await self.events.publish("APPROVAL_REQUESTED", {"plan_id": plan.id})
+        approval = self.permissions.create_approval_request(plan, requested_by="orchestrator")
+        if self.memory.postgres:
+            try:
+                await self.memory.postgres.execute("""
+                    INSERT INTO agent_core.approvals (
+                        id, plan_id, type, reason, requested_by, status, created_at
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6, $7)
+                    ON CONFLICT (id) DO UPDATE SET
+                        status = EXCLUDED.status,
+                        reason = EXCLUDED.reason
+                """,
+                approval.id,
+                approval.plan_id,
+                approval.type,
+                approval.reason,
+                approval.requested_by,
+                approval.status,
+                approval.created_at.replace(tzinfo=None) if approval.created_at.tzinfo else approval.created_at)
+            except Exception as e:
+                logger.warning("Failed to persist approval request", plan_id=plan.id, error=str(e))
 
+        await self.events.publish(
+            "APPROVAL_REQUESTED",
+            {"approval_id": approval.id, "plan_id": plan.id, "type": approval.type}
+        )
+
+    async def _persist_goal_plan_and_tasks(self, goal: Goal, plan: ExecutionPlan) -> None:
+        """Persist goal, execution plan, and tasks when Postgres is available."""
+        if not self.memory.postgres:
+            logger.debug("Postgres not initialized, keeping plan in memory", plan_id=plan.id)
+            return
+
+        try:
+            async with self.memory.postgres.transaction():
+                await self.memory.postgres.execute("""
+                    INSERT INTO agent_core.goals (
+                        id, description, objectives, constraints, deadline, priority, status, created_at, updated_at
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, CURRENT_TIMESTAMP)
+                    ON CONFLICT (id) DO UPDATE SET
+                        description = EXCLUDED.description,
+                        objectives = EXCLUDED.objectives,
+                        constraints = EXCLUDED.constraints,
+                        deadline = EXCLUDED.deadline,
+                        priority = EXCLUDED.priority,
+                        status = EXCLUDED.status,
+                        updated_at = CURRENT_TIMESTAMP
+                """,
+                goal.id,
+                goal.description,
+                json.dumps(goal.objectives),
+                json.dumps(goal.constraints),
+                goal.deadline.replace(tzinfo=None) if goal.deadline and goal.deadline.tzinfo else goal.deadline,
+                goal.priority,
+                goal.status.value if hasattr(goal.status, "value") else str(goal.status),
+                goal.created_at.replace(tzinfo=None) if goal.created_at.tzinfo else goal.created_at)
+
+                tasks_json = json.dumps([task.model_dump(mode="json") for task in plan.tasks])
+                insights_json = json.dumps(plan.learning_insights) if plan.learning_insights else None
+                status = "approval_pending" if plan.approval_required and not plan.approved else "executing"
+
+                await self.memory.postgres.execute("""
+                    INSERT INTO agent_core.execution_plans (
+                        id, goal_id, tasks, approval_required, approved, learning_insights, status, created_at
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                    ON CONFLICT (id) DO UPDATE SET
+                        tasks = EXCLUDED.tasks,
+                        approval_required = EXCLUDED.approval_required,
+                        approved = EXCLUDED.approved,
+                        learning_insights = EXCLUDED.learning_insights,
+                        status = EXCLUDED.status
+                """,
+                plan.id,
+                plan.goal_id,
+                tasks_json,
+                plan.approval_required,
+                plan.approved,
+                insights_json,
+                status,
+                plan.created_at.replace(tzinfo=None) if plan.created_at.tzinfo else plan.created_at)
+
+                for task in plan.tasks:
+                    await self.memory.postgres.execute("""
+                        INSERT INTO agent_core.tasks (
+                            id, goal_id, description, type, parameters, assigned_agent, status, dependencies, created_at
+                        )
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                        ON CONFLICT (id) DO UPDATE SET
+                            description = EXCLUDED.description,
+                            type = EXCLUDED.type,
+                            parameters = EXCLUDED.parameters,
+                            assigned_agent = EXCLUDED.assigned_agent,
+                            status = EXCLUDED.status,
+                            dependencies = EXCLUDED.dependencies
+                    """,
+                    task.id,
+                    task.goal_id,
+                    task.description,
+                    task.type,
+                    json.dumps(task.parameters),
+                    task.assigned_agent,
+                    task.status.value if hasattr(task.status, "value") else str(task.status),
+                    json.dumps(task.dependencies),
+                    task.created_at.replace(tzinfo=None) if task.created_at.tzinfo else task.created_at)
+
+            logger.info("Persisted goal execution plan", goal_id=goal.id, plan_id=plan.id)
+        except Exception as e:
+            logger.warning("Failed to persist execution plan, using memory fallback", plan_id=plan.id, error=str(e))
+
+    async def _fetch_plan_row(self, column: str, value: str):
+        if not self.memory.postgres:
+            return None
+        if column not in {"id", "goal_id"}:
+            raise ValueError("Unsupported execution plan lookup")
+        try:
+            return await self.memory.postgres.fetchrow(
+                f"SELECT * FROM agent_core.execution_plans WHERE {column} = $1",
+                value
+            )
+        except Exception as e:
+            logger.warning("Failed to fetch execution plan from database", column=column, value=value, error=str(e))
+            return None
+
+    def _plan_from_row(self, row) -> ExecutionPlan:
+        tasks_data = self._json_value(row["tasks"], default=[])
+        learning_insights = self._json_value(row["learning_insights"], default=None)
+        plan = ExecutionPlan(
+            id=row["id"],
+            goal_id=row["goal_id"],
+            tasks=[Task(**task) for task in tasks_data],
+            approval_required=row["approval_required"],
+            approved=row["approved"],
+            learning_insights=learning_insights,
+            created_at=row["created_at"],
+        )
+        self.plan_store[plan.id] = plan
+        return plan
+
+    def _goal_summary_from_row(self, row) -> Dict[str, Any]:
+        tasks = self._json_value(row["tasks"], default=[])
+        return {
+            "goal_id": row["goal_id"],
+            "plan_id": row["plan_id"],
+            "status": row["status"],
+            "learning_insights": self._json_value(row["learning_insights"], default=None),
+            "task_count": len(tasks),
+            "priority": row["priority"],
+        }
+
+    def _json_value(self, value, default):
+        if value is None:
+            return default
+        if isinstance(value, str):
+            try:
+                return json.loads(value)
+            except json.JSONDecodeError:
+                return default
+        return value
+
+    @activity.defn(name="execute_task")
     async def execute_task_activity(self, task: Task) -> Dict[str, Any]:
         """Activity to execute a task through appropriate agent"""
         logger.info("Executing task", task_id=task.id, task_type=task.type)

@@ -1,6 +1,9 @@
+from datetime import timedelta
+from typing import Any, Dict
+
 from temporalio import workflow
 from temporalio.common import RetryPolicy
-from shared.models import ExecutionPlan, Task
+from shared.models import ExecutionPlan
 import structlog
 
 logger = structlog.get_logger()
@@ -31,7 +34,7 @@ class GoalExecutionWorkflow:
                     maximum_interval=100,
                     maximum_attempts=3,
                 ),
-                start_to_close_timeout=300,  # 5 minutes
+                start_to_close_timeout=timedelta(minutes=5),
             )
 
             results[task.id] = result
